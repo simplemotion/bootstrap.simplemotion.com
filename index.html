@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# SimpleMotion.Global Enterprise Bootstrap
+# ==============================================================================
+# Usage:
+#   curl -fsSL https://raw.githubusercontent.com/simplemotion/sm-bootstrap/main/sm-bootstrap.sh | bash
+#
+# Prerequisites:
+#   - GitHub CLI (gh) authenticated with enterprise admin permissions
+#   - jq, python3 (for TOML parsing)
+#
+# This script downloads the enterprise configuration from a private gist
+# and runs the full provisioning process.
+# ==============================================================================
+
+set -euo pipefail
+
+GIST_ID="d6812112845529d0b94f99a2c54e0062"
+WORK_DIR="${HOME}/SimpleMotion"
+BOOTSTRAP_DIR="${WORK_DIR}/9999-SM-Enterprise"
+
+info()  { printf '\033[1;34m==>\033[0m %s\n' "$1"; }
+error() { printf '\033[1;31mERROR:\033[0m %s\n' "$1" >&2; exit 1; }
+
+# --- Preflight checks --------------------------------------------------------
+
+command -v gh  >/dev/null 2>&1 || error "GitHub CLI (gh) is required. Install: https://cli.github.com"
+command -v jq  >/dev/null 2>&1 || error "jq is required. Install: https://jqlang.github.io/jq/download"
+command -v python3 >/dev/null 2>&1 || error "python3 is required for TOML parsing"
+
+gh auth status >/dev/null 2>&1 || error "Not authenticated. Run: gh auth login"
+
+# Check for required scopes
+SCOPES=$(gh auth status 2>&1 | grep "Token scopes" || true)
+for scope in admin:enterprise admin:org repo; do
+  echo "$SCOPES" | grep -q "$scope" || error "Missing scope: $scope. Run: gh auth refresh -s $scope"
+done
+
+# --- Download bootstrap gist --------------------------------------------------
+
+info "Creating workspace at ${WORK_DIR}"
+mkdir -p "${WORK_DIR}"
+
+if [ -d "${BOOTSTRAP_DIR}" ]; then
+  info "Updating existing bootstrap directory"
+  cd "${BOOTSTRAP_DIR}"
+  gh gist clone "${GIST_ID}" . 2>/dev/null || gh gist view "${GIST_ID}" --raw > /dev/null
+else
+  info "Cloning bootstrap gist"
+  cd "${WORK_DIR}"
+  gh gist clone "${GIST_ID}" 9999-SM-Enterprise
+fi
+
+cd "${BOOTSTRAP_DIR}"
+
+# --- Validate configuration ---------------------------------------------------
+
+info "Validating 9999-SM-Enterprise.toml"
+python3 -c "
+import tomllib, sys
+with open('9999-SM-Enterprise.toml', 'rb') as f:
+    config = tomllib.load(f)
+slug = config['enterprise']['slug']
+tiers = config.get('tiers', {})
+print(f'  Enterprise: {slug}')
+print(f'  Tiers: {len(tiers)}')
+orgs = sum(len(t.get(\"suborgs\", {})) for t in tiers.values())
+print(f'  Total orgs: {len(tiers) + orgs}')
+" || error "Invalid TOML configuration"
+
+# --- Run provisioning ---------------------------------------------------------
+
+info "Starting enterprise provisioning"
+info "Run with --dry-run to preview changes without applying them"
+
+if [ -f "9999-SM-Enterprise.sh" ]; then
+  exec bash 9999-SM-Enterprise.sh "$@"
+else
+  error "9999-SM-Enterprise.sh not found in gist"
+fi
